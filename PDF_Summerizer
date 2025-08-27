@@ -1,0 +1,112 @@
+import pandas as pd
+import os 
+import streamlit as st
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS, Chroma
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import OpenAIEmbeddings
+from pypdf import PdfReader
+from io import BytesIO
+import faiss
+import chromadb
+
+st.title("Pdf Summerizer")
+st.markdown("---")
+
+st.subheader("Upload your pdf file")
+def chunk_docs(df):
+     if not isinstance(df, str):
+        raise TypeError(f"chunk_docs expected a string, got {type(df)}")
+     text_split = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n", ". ", " ", ""],
+        chunk_size = 300,
+        chunk_overlap=20,
+        length_function=len,)
+     chunks = text_split.split_text(df)
+     return chunks
+docs = st.file_uploader("Please upload your pdf file",type=["pdf"])
+if docs is not None:
+    pdf_bytes = docs.read()
+    reader = PdfReader(BytesIO(pdf_bytes))
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+
+    st.download_button(
+        label="Download pdf",
+        data=pdf_bytes,
+        file_name = docs.name,
+        mime="application/pdf")
+
+    data = chunk_docs(text)
+    with open(r"C:\Users\fayab\Desktop\AI\GENAI\API_Keys\OPENAI_API_KEY.txt") as f:
+        OPENAI_API_KEY = f.read().strip()
+
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small"
+    )
+    ids = [str(i) for i in range(0,len(data))]
+    victordb = Chroma.from_texts(data,embeddings,ids=ids,persist_directory="db")
+    victordb.persist()
+    st.success(f"Victor store ready with {len(data)} chunks")
+
+    query = st.text_input( "Enter Query or leave default:",
+    value="Summarize the key points of this document."
+    )
+    top_k = st.slider("Top-k chunks to retrieve", 2, 20, 6, 1)
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",   
+    temperature=0.2 )
+
+    prompt = ChatPromptTemplate.from_template( """ you are a helpful assistant.
+    Given the retrieved context, write a clear, faithful summary.
+    context:
+    {context}
+
+    Requirements:
+    - Be accurate and concise.
+    - Prefer bullet points when helpful.
+    - Keep under {max_words} words.
+    - If the context is too thin, say what is missing.
+
+    Summary:""")
+
+    chain = prompt | llm | StrOutputParser()
+
+    if st.button("Summarize"):
+        try:
+            with st.spinner("Retrieving relevant chunks..."):
+                hits = victordb.similarity_search(query if query.strip() else "Overall summary", k=top_k)
+    
+           
+            st.caption("Retrieved chunks:")
+            for i, h in enumerate(hits, start=1):
+                with st.expander(f"Source {i}"):
+                    st.write(h.page_content)
+    
+            context = "\n\n".join(h.page_content for h in hits)
+            max_words = st.number_input("Max words", 50, 1000, 250, 25, key="max_words_input")
+    
+            with st.spinner("Summarizing …"):
+                summary = chain.invoke({"context": context, "max_words": str(max_words)})
+            st.subheader("📝 Summary")
+            st.write(summary)
+    
+         
+            st.download_button(
+                "Download retrieved context",
+                data=context.encode("utf-8"),
+                file_name="retrieved_context.txt",
+                mime="text/plain"
+            )
+    
+        except Exception as e:
+            st.error(f"Summarization failed: {e}")
+            st.info("Check internet connectivity and that OPENAI_API_KEY is set.")
+        
+        
+    
